@@ -12,8 +12,68 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
+import ipaddress
+import socket
 import requests
 import feedparser
+
+# SSRF 防护：禁止抓取内网/回环/链路本地/保留地址的数据源
+_DENY_NETWORKS = [
+    ipaddress.ip_network(net)
+    for net in [
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+        "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+        "::1/128", "::/128", "fc00::/7", "fe80::/10", "2001:db8::/32",
+    ]
+]
+
+
+def _is_denied_ip(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True
+    return any(ip in net for net in _DENY_NETWORKS)
+
+
+def _resolve_ips(host: str) -> list[str]:
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        return sorted({i[4][0] for i in infos})
+    except socket.gaierror:
+        return []
+
+
+def validate_source_url(url: str) -> str:
+    """校验数据源 URL：仅允许 http(s)，且解析后不得指向内网/回环/保留地址。
+
+    返回原 URL；非法则抛 ValueError。抓取前调用，防止服务器被诱导访问内部服务（SSRF）。
+    """
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        raise ValueError("数据源地址仅支持 http/https")
+    host = (p.hostname or "").rstrip(".").lower()
+    if not host:
+        raise ValueError("数据源地址缺少有效域名")
+
+    # 字面 IP
+    try:
+        ip = ipaddress.ip_address(host)
+        if _is_denied_ip(str(ip)):
+            raise ValueError("数据源地址指向内网/回环/保留地址，已拦截")
+        return url
+    except ValueError:
+        if host == "localhost":
+            raise ValueError("数据源地址不支持 localhost")
+
+    # 域名：解析所有 IP，任一命中禁止段即拒绝
+    ip_list = _resolve_ips(host)
+    if not ip_list:
+        raise ValueError(f"无法解析数据源域名: {host}")
+    if any(_is_denied_ip(ip) for ip in ip_list):
+        raise ValueError("数据源域名解析到内网/回环/保留地址，已拦截")
+    return url
 
 
 @dataclass
@@ -62,6 +122,10 @@ class RSSFetcher(BaseFetcher):
         url = source_config.get("url", "")
         if not url:
             return []
+        try:
+            validate_source_url(url)
+        except ValueError as e:
+            raise FetchError(f"数据源地址校验未通过: {e}")
 
         try:
             resp = requests.get(
@@ -70,6 +134,11 @@ class RSSFetcher(BaseFetcher):
                 headers={"User-Agent": "BidMaster-Pro/1.0 (Tender Monitor)"},
             )
             resp.raise_for_status()
+            # 重定向后再次校验最终地址，防止跳转到内网
+            try:
+                validate_source_url(resp.url)
+            except ValueError as e:
+                raise FetchError(f"数据源重定向到不安全地址: {e}")
         except requests.exceptions.Timeout:
             raise FetchError(f"RSS 抓取超时: {url}")
         except requests.exceptions.RequestException as e:
@@ -168,6 +237,11 @@ class APIFetcher(BaseFetcher):
     async def fetch(self, source_config: dict) -> List[NewsItem]:
         code = source_config.get("code", "")
         if code == "github_tender":
+            url = source_config.get("url", "https://api.github.com/search/repositories")
+            try:
+                validate_source_url(url)
+            except ValueError as e:
+                raise FetchError(f"数据源地址校验未通过: {e}")
             return await self._fetch_github_trending(source_config)
         return []
 
@@ -248,11 +322,39 @@ class APIFetcher(BaseFetcher):
 
 
 class HTMLFetcher(BaseFetcher):
-    """HTML 抓取器 (预留扩展,默认走 NewsCrawlerSkill)"""
+    """HTML 列表页抓取器（列表+详情双步解析）
+
+    复用 NewsCrawlerSkill 的 HTML 解析逻辑，对真实招标/公告列表页生效，
+    替代此前直接返回 [] 的占位实现。
+    """
 
     async def fetch(self, source_config: dict) -> List[NewsItem]:
-        # HTML 抓取维持原有 NewsCrawlerSkill 流程,这里不重复实现
-        return []
+        url = source_config.get("url", "")
+        if not url:
+            return []
+        try:
+            validate_source_url(url)
+        except ValueError as e:
+            raise FetchError(f"数据源地址校验未通过: {e}")
+
+        from services.news.skills.news_crawler_skill import NewsCrawlerSkill
+
+        raw_items = await NewsCrawlerSkill()._crawl_site(
+            url, "", "", "", 3, None
+        )
+        items: List[NewsItem] = []
+        for it in raw_items:
+            items.append(NewsItem(
+                title=it.get("title", ""),
+                url=it.get("url", ""),
+                source=source_config.get("name", ""),
+                pub_date=it.get("pub_date", ""),
+                content=it.get("content", ""),
+                source_code=source_config.get("code", ""),
+                industry_code=source_config.get("industry", source_config.get("industry_code", "12")),
+                extra={"fetch_type": "html"},
+            ))
+        return items
 
 
 class BrowserFetcher(BaseFetcher):

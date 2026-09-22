@@ -302,6 +302,8 @@ export const checkApi = {
   submitCheck: (projectId: string, checkType: string) =>
     api.post(`/check/${projectId}/check-async`, { check_type: checkType }),
   listReports: (projectId: string) => api.get(`/check/${projectId}/reports`),
+  reviseBid: (projectId: string, payload: { chapter_ids?: string[]; check_types?: string[] } = {}) =>
+    api.post(`/check/${projectId}/revise`, payload),
   getReportContent: (projectId: string, reportId: string, format: string = 'markdown') =>
     api.get(`/check/${projectId}/reports/${reportId}/content?format=${format}`),
   exportReport: (projectId: string, reportId: string, format: string = 'markdown') =>
@@ -489,7 +491,7 @@ export const newsApi = {
   listTasks: () => api.get('/news/tasks'),
   createTask: (data: { name: string; keywords: string; sites?: string[]; interval_minutes?: number }) =>
     api.post('/news/tasks', data),
-  updateTask: (id: string, data: { enabled?: boolean; name?: string; keywords?: string }) =>
+  updateTask: (id: string, data: { enabled?: boolean; name?: string; keywords?: string; exclude_keywords?: string; must_contain_keywords?: string; sites?: string[]; interval_minutes?: number }) =>
     api.patch(`/news/tasks/${id}`, data),
   deleteTask: (id: string) => api.delete(`/news/tasks/${id}`),
   runTask: (id: string) => api.post(`/news/tasks/${id}/run`),
@@ -507,6 +509,8 @@ export const newsApi = {
   syncSources: () => api.post<{ success: boolean; synced: number; message: string }>('/news/sources/sync'),
   toggleSource: (code: string, enabled: boolean) =>
     api.patch<{ success: boolean; code: string; enabled: boolean }>(`/news/sources/${code}`, { enabled }),
+  updateSource: (code: string, data: { name?: string; url?: string; description?: string; industry_code?: string; weight?: number; enabled?: boolean }) =>
+    api.put<{ success: boolean; code: string; message?: string }>(`/news/sources/${code}`, data),
   aggregate: (payload: {
     source_codes?: string[];
     industry_code?: string;

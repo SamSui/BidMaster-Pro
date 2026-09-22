@@ -4,7 +4,7 @@ import {
   Newspaper, Plus, Trash2, Play, Loader2, RefreshCw, Filter, Bell, TrendingUp, Flame, Briefcase,
   Clock, ExternalLink, Zap, Database, Sparkles, ArrowRight, ArrowLeft, Check, X,
   Star, MapPin, DollarSign, Building2, Rocket, Layers, Settings2, BarChart3,
-  FileText, Copy, Globe, AlertTriangle,
+  FileText, Copy, Globe, AlertTriangle, Edit,
 } from 'lucide-react';
 import { newsApi, type Industry, type NewsSource, type Hotspot, type HotspotScoreDetail, type HotspotDetail } from '../services/api';
 import { useAppStore } from '../stores/appStore';
@@ -60,11 +60,15 @@ export default function NewsPage() {
   const setCurrentProject = useAppStore((s) => s.setCurrentProject);
   const [tasks, setTasks] = useState<MonitorTask[]>([]);
   const [showAdd, setShowAdd] = useState(false);
+  const [editingTask, setEditingTask] = useState<MonitorTask | null>(null);
   const [newName, setNewName] = useState('');
   const [newKeywords, setNewKeywords] = useState('');
   const [newExclude, setNewExclude] = useState('');
   const [newMustContain, setNewMustContain] = useState('');
   const [newSites, setNewSites] = useState('');
+  const [newSitesCodes, setNewSitesCodes] = useState<string[]>([]);
+  const [sourcePickerOpen, setSourcePickerOpen] = useState(false);
+  const [sourcePickerSel, setSourcePickerSel] = useState<string[]>([]);
   const [newsResults, setNewsResults] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<string>('');
@@ -84,6 +88,13 @@ export default function NewsPage() {
   const [sources, setSources] = useState<NewsSource[]>([]);
   const [sourcesFilter, setSourcesFilter] = useState<string>('all');
   const [sourcesLoading, setSourcesLoading] = useState(false);
+  const [editingSource, setEditingSource] = useState<NewsSource | null>(null);
+  const [srcEditName, setSrcEditName] = useState('');
+  const [srcEditUrl, setSrcEditUrl] = useState('');
+  const [srcEditDesc, setSrcEditDesc] = useState('');
+  const [srcEditIndustry, setSrcEditIndustry] = useState('');
+  const [srcEditWeight, setSrcEditWeight] = useState<number>(1);
+  const [savingSource, setSavingSource] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
   const [hotspots, setHotspots] = useState<Hotspot[]>([]);
@@ -210,23 +221,65 @@ export default function NewsPage() {
   };
 
   // === 基础任务操作 (保持原逻辑) ===
+  const resetTaskForm = () => {
+    setNewName(''); setNewKeywords(''); setNewExclude(''); setNewMustContain(''); setNewSites(''); setNewSitesCodes([]);
+    setEditingTask(null);
+  };
+
+  const openQuickCreate = () => {
+    setEditingTask(null);
+    setNewName(''); setNewKeywords(''); setNewExclude(''); setNewMustContain(''); setNewSites(''); setNewSitesCodes([]);
+    setWizardStep(0);
+    setShowAdd(true);
+  };
+
+  const openEditTask = (task: MonitorTask) => {
+    setNewName(task.name || '');
+    setNewKeywords(task.keywords || '');
+    setNewExclude(task.exclude_keywords || '');
+    setNewMustContain(task.must_contain_keywords || '');
+    setNewSites((task.sites || []).join(', '));
+    setNewSitesCodes(task.sites || []);
+    setEditingTask(task);
+    setWizardStep(0);
+    setShowAdd(true);
+    setError('');
+  };
+
+  const openSourcePicker = () => {
+    setSourcePickerSel(newSitesCodes.length > 0 ? [...newSitesCodes] : []);
+    if (sources.length === 0) loadSources();
+    setSourcePickerOpen(true);
+  };
+
+  const applySourcePicker = () => {
+    setNewSitesCodes([...sourcePickerSel]);
+    setNewSites(sourcePickerSel.join(', '));
+    setSourcePickerOpen(false);
+  };
+
+  const sourceName = (code: string) => sources.find(s => s.code === code)?.name || code;
+
   const handleAddTask = async () => {
     if (!newName.trim() || !newKeywords.trim()) return;
+    const payload = {
+      name: newName.trim(),
+      keywords: newKeywords.trim(),
+      exclude_keywords: newExclude.trim(),
+      must_contain_keywords: newMustContain.trim(),
+      sites: newSitesCodes,
+    };
     try {
-      await newsApi.createTask({
-        name: newName.trim(),
-        keywords: newKeywords.trim(),
-        sites: newSites.split(',').map(s => s.trim()).filter(Boolean),
-      });
-      setNewName('');
-      setNewKeywords('');
-      setNewExclude('');
-      setNewMustContain('');
-      setNewSites('');
+      if (editingTask) {
+        await newsApi.updateTask(editingTask.id, payload);
+      } else {
+        await newsApi.createTask(payload);
+      }
+      resetTaskForm();
       setShowAdd(false);
       await loadTasks();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : '创建任务失败');
+      setError(e instanceof Error ? e.message : (editingTask ? '保存失败' : '创建任务失败'));
     }
   };
 
@@ -312,8 +365,9 @@ export default function NewsPage() {
       const results = res.data.results || [];
       if (results.length > 0) {
         setNewsResults(results);
-        setActiveTab('results');
       }
+      // 无论结果多少都切到「采集结果」页，确保爬取异常的详情面板可见
+      setActiveTab('results');
     } catch (e) {
       console.error('查看结果失败', e);
     }
@@ -381,6 +435,36 @@ export default function NewsPage() {
       await loadSources();
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : '操作失败');
+    }
+  };
+
+  const openEditSource = (src: NewsSource) => {
+    setEditingSource(src);
+    setSrcEditName(src.name);
+    setSrcEditUrl(src.url);
+    setSrcEditDesc(src.description || '');
+    setSrcEditIndustry(src.industry_code);
+    setSrcEditWeight(src.weight);
+  };
+
+  const handleSaveSource = async () => {
+    if (!editingSource) return;
+    setSavingSource(true);
+    try {
+      await newsApi.updateSource(editingSource.code, {
+        name: srcEditName.trim(),
+        url: srcEditUrl.trim(),
+        description: srcEditDesc.trim(),
+        industry_code: srcEditIndustry,
+        weight: srcEditWeight,
+      });
+      showToast('success', `数据源 ${editingSource.code} 已更新`);
+      setEditingSource(null);
+      await loadSources();
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : '更新失败');
+    } finally {
+      setSavingSource(false);
     }
   };
 
@@ -725,13 +809,13 @@ export default function NewsPage() {
             <RefreshCw size={14} />
           </button>
           <button
-            onClick={() => { resetWizard(); setShowAdd(true); setWizardStep(1); }}
+            onClick={() => { resetWizard(); setEditingTask(null); setShowAdd(true); setWizardStep(1); }}
             style={{ padding: '6px 14px', background: 'linear-gradient(135deg, #1a56db, #1e40af)', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '4px' }}
           >
             <Sparkles size={14} /> 4步向导创建
           </button>
           <button
-            onClick={() => setShowAdd(true)}
+            onClick={openQuickCreate}
             style={{ padding: '6px 14px', background: 'var(--color-primary)', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '4px' }}
           >
             <Plus size={14} /> 快速创建
@@ -741,6 +825,9 @@ export default function NewsPage() {
 
       {showAdd && wizardStep === 0 && (
         <div style={{ marginBottom: '16px', padding: '16px', border: '1px solid var(--color-border)', borderRadius: '8px' }}>
+          <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>
+            {editingTask ? `编辑任务：${editingTask.name}` : '快速创建'}
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
             <div>
               <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>任务名称</label>
@@ -760,12 +847,25 @@ export default function NewsPage() {
             </div>
           </div>
           <div style={{ marginBottom: '12px' }}>
-            <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>监控网站(逗号分隔，可选)</label>
-            <input type="text" value={newSites} onChange={(e) => setNewSites(e.target.value)} placeholder="ccgp.gov.cn,chinabidding.cn" style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '14px', boxSizing: 'border-box' }} />
+            <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>监控数据源（可选）</label>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <button type="button" onClick={openSourcePicker} style={{ padding: '7px 12px', background: '#eff6ff', color: '#1e40af', border: '1px solid #bfdbfe', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>
+                选择数据源 {newSitesCodes.length > 0 ? `(${newSitesCodes.length})` : ''}
+              </button>
+            </div>
+            {newSitesCodes.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' }}>
+                {newSitesCodes.map(code => (
+                  <span key={code} onClick={() => { setNewSitesCodes(newSitesCodes.filter(c => c !== code)); }} style={{ padding: '2px 10px', background: '#dbeafe', color: '#1e40af', borderRadius: '12px', fontSize: '12px', cursor: 'pointer' }}>
+                    {sourceName(code)} ✕
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
-            <button onClick={handleAddTask} style={{ padding: '6px 16px', background: '#059669', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>确认创建</button>
-            <button onClick={() => setShowAdd(false)} style={{ padding: '6px 16px', background: 'var(--color-surface)', color: 'var(--color-text)', border: '1px solid var(--color-border)', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>取消</button>
+            <button onClick={handleAddTask} style={{ padding: '6px 16px', background: '#059669', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>{editingTask ? '保存修改' : '确认创建'}</button>
+            <button onClick={() => { setShowAdd(false); setEditingTask(null); }} style={{ padding: '6px 16px', background: 'var(--color-surface)', color: 'var(--color-text)', border: '1px solid var(--color-border)', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>取消</button>
           </div>
         </div>
       )}
@@ -796,8 +896,11 @@ export default function NewsPage() {
                 <button onClick={() => handleViewResults(task.id)} style={{ padding: '4px 10px', background: '#0f766e', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
                   查看
                 </button>
-                <button onClick={() => handleToggleTask(task)} style={{ padding: '4px 10px', background: task.enabled ? '#ecfdf5' : '#f8fafc', color: task.enabled ? '#059669' : '#6b7280', border: '1px solid var(--color-border)', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
-                  {task.enabled ? '已启用' : '已禁用'}
+                <button onClick={() => openEditTask(task)} style={{ padding: '4px 10px', background: '#7c3aed', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                  编辑
+                </button>
+                <button onClick={() => handleToggleTask(task)} style={{ padding: '4px 10px', background: task.enabled ? '#fef2f2' : '#ecfdf5', color: task.enabled ? '#dc2626' : '#059669', border: '1px solid var(--color-border)', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                  {task.enabled ? '停用' : '启用'}
                 </button>
                 <button onClick={() => handleRemoveTask(task.id)} style={{ padding: '4px 8px', background: '#fef2f2', color: '#dc2626', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
                   <Trash2 size={14} />
@@ -1557,6 +1660,12 @@ export default function NewsPage() {
                   {src.url}
                 </a>
                 <button
+                  onClick={() => openEditSource(src)}
+                  style={{ padding: '3px 10px', background: '#eff6ff', color: '#2563eb', border: '1px solid #bfdbfe', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, marginRight: '6px', flexShrink: 0 }}
+                >
+                  <Edit size={10} /> 编辑
+                </button>
+                <button
                   onClick={() => handleToggleSource(src)}
                   style={{
                     padding: '3px 12px',
@@ -1665,6 +1774,79 @@ export default function NewsPage() {
       {activeTab === 'today-hot' && renderTodayHotTab()}
       {activeTab === 'tasks' && renderTasksTab()}
       {activeTab === 'results' && renderResultsTab()}
+
+      {/* 任务数据源选择弹框 */}
+      {sourcePickerOpen && (
+        <div onClick={() => setSourcePickerOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: 'white', borderRadius: '12px', width: '90%', maxWidth: '560px', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--color-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <strong>选择监控数据源</strong>
+              <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>已选 {sourcePickerSel.length} 个</span>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+              {sources.length === 0 ? (
+                <p style={{ color: 'var(--color-text-secondary)', fontSize: '13px' }}>暂无数据源，请先在「数据源管理」同步。</p>
+              ) : sources.map(src => {
+                const checked = sourcePickerSel.includes(src.code);
+                return (
+                  <label key={src.code} onClick={() => setSourcePickerSel(prev => checked ? prev.filter(c => c !== src.code) : [...prev, src.code])}
+                    style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 6px', borderRadius: '6px', cursor: 'pointer', background: checked ? '#eff6ff' : 'transparent' }}>
+                    <input type="checkbox" checked={checked} readOnly style={{ accentColor: '#2563eb' }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '13px', fontWeight: 500 }}>{src.name}</div>
+                      <div style={{ fontSize: '11px', color: 'var(--color-text-secondary)' }}>{src.code} · {src.type.toUpperCase()}</div>
+                    </div>
+                    {!src.enabled && <span style={{ fontSize: '10px', color: '#d97706', flexShrink: 0 }}>已停用</span>}
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--color-border)', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+              <button onClick={() => setSourcePickerOpen(false)} style={{ padding: '6px 16px', background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>取消</button>
+              <button onClick={applySourcePicker} style={{ padding: '6px 16px', background: '#2563eb', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>确定</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 数据源编辑弹框 */}
+      {editingSource && (
+        <div onClick={() => setEditingSource(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: 'white', borderRadius: '12px', width: '90%', maxWidth: '480px', display: 'flex', flexDirection: 'column', maxHeight: '85vh' }}>
+            <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--color-border)' }}>
+              <strong>编辑数据源 · {editingSource.code}</strong>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div>
+                <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>名称</label>
+                <input type="text" value={srcEditName} onChange={e => setSrcEditName(e.target.value)} style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '14px', boxSizing: 'border-box' }} />
+              </div>
+              <div>
+                <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>地址 (URL)</label>
+                <input type="text" value={srcEditUrl} onChange={e => setSrcEditUrl(e.target.value)} style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '14px', boxSizing: 'border-box' }} />
+              </div>
+              <div>
+                <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>说明</label>
+                <textarea value={srcEditDesc} onChange={e => setSrcEditDesc(e.target.value)} rows={2} style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', resize: 'vertical' }} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>行业代码</label>
+                  <input type="text" value={srcEditIndustry} onChange={e => setSrcEditIndustry(e.target.value)} style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '14px', boxSizing: 'border-box' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>权重</label>
+                  <input type="number" step={0.1} min={0} max={1} value={String(srcEditWeight)} onChange={e => setSrcEditWeight(parseFloat(e.target.value) || 0)} style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '14px', boxSizing: 'border-box' }} />
+                </div>
+              </div>
+            </div>
+            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--color-border)', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+              <button onClick={() => setEditingSource(null)} style={{ padding: '6px 16px', background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>取消</button>
+              <button onClick={handleSaveSource} disabled={savingSource} style={{ padding: '6px 16px', background: savingSource ? '#94a3b8' : '#059669', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>{savingSource ? '保存中...' : '保存'}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div style={{ marginTop: '16px', padding: '12px', background: '#fef2f2', borderRadius: '8px', color: '#dc2626', fontSize: '13px' }}>{error}</div>

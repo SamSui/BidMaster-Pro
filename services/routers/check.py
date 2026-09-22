@@ -1463,3 +1463,247 @@ async def check_pricing_logic(project_id: str, db: AsyncSession = Depends(get_db
         db.add(report)
         await db.flush()
     return {"success": skill_result.success, "data": skill_result.data, "error": skill_result.error, "warnings": skill_result.warnings}
+# ---------------------------------------------------------------------------
+# 修订：按投标检查建议重写章节（定向按章节修订）
+# 调用链：CheckPage「按此建议修订/按全部建议重写」 → POST /check/{id}/revise
+#       → TaskManager 异步 worker _do_revise_bid → ChapterRevisionSkill → 落库 → 复检
+# ---------------------------------------------------------------------------
+
+_FINDING_ITEM_KEYS = ("findings", "items", "issues", "problems", "check_items", "checks")
+
+
+def _extract_finding_items(data) -> list[dict]:
+    """从一份检查结果 dict 中取出发现项(含建议)列表。"""
+    if not isinstance(data, dict):
+        return []
+    for k in _FINDING_ITEM_KEYS:
+        v = data.get(k)
+        if isinstance(v, list):
+            return [it for it in v if isinstance(it, dict)]
+    return []
+
+
+def _report_findings(report) -> list[dict]:
+    """递归收集一张 CheckReport 内的全部发现项（兼容 full-check 包装与单检查数据）。"""
+    found: list[dict] = []
+    results = report.results
+
+    def scan(node):
+        if not isinstance(node, dict):
+            return
+        direct = _extract_finding_items(node)
+        if direct:
+            found.extend(direct)
+        # full-check 包装: value 可能是 {success,data,error}
+        for v in node.values():
+            if isinstance(v, dict) and "success" in v:
+                inner = v.get("data")
+                if isinstance(inner, dict):
+                    scan(inner)
+
+    scan(results)
+    return found
+
+
+def _find_chapter_by_text(ch_by_title: dict, text: str) -> Chapter | None:
+    """按文本(text)中是否含章节标题来锚定章节。"""
+    text = str(text or "")
+    for title, ch in ch_by_title.items():
+        if title and title in text:
+            return ch
+    return None
+
+
+def _anchor_findings_to_chapters(
+    chapters: list, reports: list,
+) -> tuple[dict[str, list[dict]], list[dict]]:
+    """把各检查报告的发现项锚定到章节。返回 ({chapter_id: findings[]}, 全局/未锚定发现)。"""
+    ch_by_title = {}
+    for ch in chapters:
+        t = (ch.title or "").strip()
+        if t:
+            ch_by_title.setdefault(t, ch)
+    anchored: dict[str, list[dict]] = {ch.id: [] for ch in chapters}
+    global_findings: list[dict] = []
+
+    for rep in reports:
+        for it in _report_findings(rep):
+            # 优先检查输出自带的显式定位字段
+            explicit = it.get("chapter_id") or it.get("target_section")
+            aimed = anchored.get(str(explicit)) if explicit else None
+            loc = str(
+                it.get("response_location")
+                or it.get("detail")
+                or it.get("requirement")
+                or it.get("title")
+                or ""
+            )
+            if aimed is None:
+                # 回退：按章节标题在定位文本中的命中
+                ch = _find_chapter_by_text(ch_by_title, loc)
+                aimed = anchored.get(ch.id) if ch else None
+            if aimed is not None:
+                aimed.append(it)
+            else:
+                global_findings.append(it)
+
+    return anchored, global_findings
+
+
+class ReviseRequest(BaseModel):
+    chapter_ids: list[str] = []     # 空 = 修订有发现项(或全局)覆盖的章节
+    check_types: list[str] = []     # 复检类型，空 = 默认 compliance + disqualification
+
+
+async def _run_recheck_for_type(
+    db, ct: str, tender_text: str, bid_text: str, max_price=None, bid_deadline="", project_facts=None,
+) -> dict:
+    """对修订后的标书重跑某个检查，存入 CheckReport，返回摘要。"""
+    skill_info = _CHECK_SKILL_MAP.get(ct)
+    if not skill_info:
+        return {"type": ct, "ran": False, "error": "未知检查类型 " + ct}
+    module_path, class_name = skill_info
+    module = importlib.import_module(module_path)
+    skill_cls = getattr(module, class_name)
+    skill = skill_cls()
+    base = {"tender_text": tender_text, "bid_text": bid_text}
+    if ct == "pricing" and max_price is not None:
+        base["max_price"] = max_price
+    if ct == "qualification" and bid_deadline:
+        base["bid_deadline"] = bid_deadline
+    if ct == "consistency" and project_facts:
+        base["project_facts"] = project_facts
+    if ct in ("duplicate", "aiTextCheck"):
+        base = {"bid_text": bid_text, "reference_texts": []}
+    if ct == "aiTextCheck":
+        base = {"bid_text": bid_text}
+
+    ctx = SkillContext(project_id="", db=db, llm=get_llm_gateway(), parameters=base)
+    res = await skill.safe_execute(ctx)
+    if not res.success:
+        return {"type": ct, "ran": True, "success": False, "error": res.error}
+    data = res.data or {}
+    report = CheckReport(
+        project_id="",
+        type=_CHECK_TYPE_TO_ENUM.get(ct, CheckType.COMPLIANCE),
+        results=data,
+        risk_level=data.get("risk_level", "low"),
+    )
+    db.add(report)
+    await db.flush()
+    bad = 0
+    for it in _extract_finding_items(data):
+        st = str(it.get("status") or it.get("response_status") or "").lower()
+        if st in ("non_compliant", "partial", "missing", "fail", "failed"):
+            bad += 1
+    return {"type": ct, "ran": True, "success": True, "remaining_issues": bad}
+
+
+async def _do_revise_bid(project_id: str, check_types: list[str], task=None):
+    """异步修订 worker：锚定建议 → 定向重写受影响章节 → 落库 → 复检。"""
+    from services.database import async_session
+
+    session_factory = async_session()
+    async with session_factory() as db:
+        project = (await db.execute(
+            select(Project).where(Project.id == project_id)
+        )).scalar_one_or_none()
+        if not project:
+            return {"success": False, "error": "项目不存在"}
+
+        chapters = (await db.execute(
+            select(Chapter).where(Chapter.project_id == project.id).order_by(Chapter.sort_order)
+        )).scalars().all()
+        if not chapters:
+            return {"success": False, "error": "项目没有章节内容"}
+
+        reports = (await db.execute(
+            select(CheckReport).where(CheckReport.project_id == project.id)
+        )).scalars().all()
+        anchored, global_findings = _anchor_findings_to_chapters(chapters, reports)
+
+        # 目标章节：有锚定结果，或存在未锚定(全局)发现项时对全文章节修订
+        target_chapters = [
+            ch for ch in chapters
+            if anchored.get(ch.id) or (global_findings and ch.content)
+        ]
+        if not target_chapters:
+            return {"success": False, "error": "未从检查报告中找到需修订的发现项"}
+
+        tender_text = ""
+        if project.tender_doc_id:
+            doc = (await db.execute(
+                select(Document).where(Document.id == project.tender_doc_id)
+            )).scalar_one_or_none()
+            if doc and doc.parsed_content:
+                tender_text = _truncate_text(doc.parsed_content, get_settings().tender_text_max_chars)
+
+        gateway = get_llm_gateway()
+        revised: list[dict] = []
+        for idx, ch in enumerate(target_chapters):
+            if task is not None:
+                task.progress_message = "修订标书 {}/{}：{}".format(idx + 1, len(target_chapters), ch.title)
+            findings = list(anchored.get(ch.id, []))
+            if global_findings:
+                findings.extend(global_findings)
+            from services.check.skills.chapter_revision_skill import ChapterRevisionSkill
+            skill = ChapterRevisionSkill()
+            ctx = SkillContext(
+                project_id=project_id, db=db, llm=gateway,
+                parameters={
+                    "chapter_title": ch.title,
+                    "original_content": ch.content or "",
+                    "findings": findings,
+                },
+            )
+            res = await skill.safe_execute(ctx)
+            if res.success and res.data.get("changed"):
+                ch.content = res.data.get("content", ch.content)
+                ch.word_count = len(ch.content or "")
+                ch.status = "revised"
+                revised.append({"chapter_id": str(ch.id), "title": ch.title, "changed": True})
+            elif res.success:
+                revised.append({"chapter_id": str(ch.id), "title": ch.title, "changed": False,
+                                "reason": res.data.get("reason", "")})
+            else:
+                logger.warning("修订章节 {} 失败: {}".format(ch.title, res.error))
+                revised.append({"chapter_id": str(ch.id), "title": ch.title, "changed": False, "error": res.error})
+            await db.flush()
+
+        # 复检
+        bid_text = "\n\n".join(ch.content or "" for ch in chapters if ch.content)
+        recheck_summary = []
+        for ct in (check_types or ["compliance", "disqualification"]):
+            summary = await _run_recheck_for_type(db, ct, tender_text, bid_text)
+            recheck_summary.append(summary)
+            await db.flush()
+
+        await db.commit()
+        return {
+            "success": True,
+            "revised_chapters": revised,
+            "changed_count": sum(1 for r in revised if r.get("changed")),
+            "recheck": recheck_summary,
+        }
+
+
+@router.post("/{project_id}/revise")
+async def submit_revise_bid(
+    project_id: str,
+    body: ReviseRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """按检查建议修订标书：异步任务，返回 task_id 供轮询。"""
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    tm = TaskManager.instance()
+    task = tm.create_task("revise_bid")
+    await tm.run(task, _do_revise_bid, project_id, body.check_types or [], task)
+
+    return {
+        "task_id": task.task_id,
+        "status": "pending",
+        "message": "按建议修订标书任务已提交，可通过 GET /check/task/{task_id} 查询进度",
+    }

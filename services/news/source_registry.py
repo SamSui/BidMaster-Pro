@@ -38,6 +38,34 @@ def reload_sources_yaml() -> dict:
     return load_sources_yaml()
 
 
+def update_source_in_yaml(code: str, fields: dict) -> bool:
+    """把数据源编辑写回 sources.yaml，避免「从YAML同步」把 DB 改动还原。
+
+    fields 的 key 使用 YAML 内 source 字段命名（name/url/description/industry/weight/enabled/type）。
+    写回后同步更新内存缓存。返回是否找到并更新成功。
+    """
+    global _yaml_cache
+    data = load_sources_yaml()  # 加载(或复用缓存)后原地修改
+    found = False
+    for group, sources in data.items():
+        if not isinstance(sources, list):
+            continue
+        for src in sources:
+            if src.get("code") == code:
+                for k, v in fields.items():
+                    src[k] = v
+                found = True
+                break
+        if found:
+            break
+    if not found:
+        return False
+    with open(_YAML_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, default_flow_style=False)
+    _yaml_cache = data  # 保持缓存一致
+    return True
+
+
 def get_all_sources() -> list[dict]:
     """获取全部源 (扁平化)"""
     yaml_data = load_sources_yaml()

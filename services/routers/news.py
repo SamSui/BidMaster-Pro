@@ -31,6 +31,17 @@ class MonitorTaskCreate(BaseModel):
     interval_minutes: int = 60
 
 
+class MonitorTaskUpdate(BaseModel):
+    """编辑监控任务：仅更新传入的非空字段。"""
+    name: str | None = None
+    keywords: str | None = None
+    exclude_keywords: str | None = None
+    must_contain_keywords: str | None = None
+    sites: list[str] | None = None
+    enabled: bool | None = None
+    interval_minutes: int | None = None
+
+
 @router.get("/tasks")
 async def list_monitor_tasks(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(MonitoringTask).order_by(MonitoringTask.created_at.desc()))
@@ -81,9 +92,7 @@ async def create_monitor_task(
 @router.patch("/tasks/{task_id}")
 async def update_monitor_task(
     task_id: str,
-    enabled: bool | None = None,
-    name: str | None = None,
-    keywords: str | None = None,
+    body: MonitorTaskUpdate,
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -93,15 +102,32 @@ async def update_monitor_task(
     if not task:
         raise HTTPException(status_code=404, detail="监控任务不存在")
 
-    if enabled is not None:
-        task.enabled = enabled
-    if name is not None:
-        task.name = name
-    if keywords is not None:
-        task.keywords = keywords
+    if body.name is not None:
+        task.name = body.name
+    if body.keywords is not None:
+        task.keywords = body.keywords
+    if body.exclude_keywords is not None:
+        task.exclude_keywords = body.exclude_keywords
+    if body.must_contain_keywords is not None:
+        task.must_contain_keywords = body.must_contain_keywords
+    if body.sites is not None:
+        task.sites = body.sites
+    if body.enabled is not None:
+        task.enabled = body.enabled
+    if body.interval_minutes is not None:
+        task.interval_minutes = body.interval_minutes
     await db.flush()
+    await db.commit()
 
-    return {"id": str(task.id), "name": task.name, "enabled": task.enabled}
+    return {
+        "id": str(task.id),
+        "name": task.name,
+        "enabled": task.enabled,
+        "keywords": task.keywords,
+        "exclude_keywords": task.exclude_keywords,
+        "must_contain_keywords": task.must_contain_keywords,
+        "sites": task.sites,
+    }
 
 
 @router.delete("/tasks/{task_id}")
@@ -169,78 +195,76 @@ async def run_monitor_task(task_id: str, db: AsyncSession = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="监控任务不存在")
 
-    from services.news.source_registry import get_sources_by_codes  # 已顶部导入,保留兼容
+    from services.news.source_registry import get_sources_by_codes
+    from services.news.fetchers import get_fetcher
+    from services.news.skills.news_crawler_skill import NewsCrawlerSkill
 
     # 解析 sites: 兼容 code 列表 (来自 4 步创建向导) 和 URL 列表 (旧格式)
-    # - 先尝试按 code 解析
-    # - API 类型源 (type=api) 跳过: NewsCrawlerSkill 是 HTML 抓取器,不处理 JSON API
-    # - 解析不到的 (例如纯 URL 字符串) 直接当作 URL
     sites = task.sites or []
     source_by_code = {s.get("code"): s for s in get_sources_by_codes(sites)}
-    resolved_urls: list[str] = []
+
+    # 按源类型路由到对应 fetcher（RSS→feedparser / API→GitHub / crawl→HTML），
+    # 不再用 HTML 解析器硬套 RSS，避免 RSS 源返回 XML 却当 HTML 解析导致 0 条。
+    configs: list[dict] = []
     unresolved: list[str] = []
-    skipped_api: list[str] = []
     for s in sites:
         if not isinstance(s, str):
             continue
         if s in source_by_code:
             src = source_by_code[s]
-            src_type = (src.get("type") or "rss").lower()
-            if src_type == "api":
-                # API 类型源不在监控任务里抓取 (走聚合流程)
-                skipped_api.append(s)
-                continue
-            url = src.get("url", "")
-            if url:
-                resolved_urls.append(url)
+            configs.append({
+                "name": src.get("name", s), "code": s,
+                "type": (src.get("type") or "rss").lower(),
+                "url": src.get("url", ""),
+                "industry": src.get("industry", ""),
+            })
         elif s.startswith(("http://", "https://")):
-            # 旧格式: 直接是 URL (假定为 HTML 页面)
-            resolved_urls.append(s)
+            # 旧格式: 直接是 URL, 默认为 RSS
+            configs.append({"name": s, "code": s, "type": "rss", "url": s, "industry": ""})
         else:
             unresolved.append(s)
     if unresolved:
         logger.warning(
             f"监控任务 {task_id} 中 {len(unresolved)} 个 site 既不是合法 code 也不是 URL,已忽略: {unresolved[:5]}"
         )
-    if skipped_api:
-        logger.info(
-            f"监控任务 {task_id} 跳过 {len(skipped_api)} 个 API 类型源 (应在聚合流程中使用): {skipped_api[:5]}"
-        )
 
-    gateway = get_llm_gateway()
-    skill = NewsCrawlerSkill()
-    ctx = SkillContext(
-        project_id="",
-        db=db,
-        llm=gateway,
-        parameters={
-            "task_id": task_id,
-            "keywords": task.keywords,
-            "exclude_keywords": task.exclude_keywords,
-            "must_contain_keywords": task.must_contain_keywords,
-            "sites": resolved_urls,
-            "max_pages": 3,
-        },
+    configs = [c for c in configs if c.get("url")][:5]
+
+    all_items: list[dict] = []
+    errors: list[dict] = []
+    for cfg in configs:
+        try:
+            fetcher = get_fetcher(cfg.get("type", "rss"))
+            fetched = await fetcher.fetch(cfg)
+            all_items.extend([it.to_dict() for it in fetched if it is not None])
+        except Exception as e:
+            name = cfg.get("name") or cfg.get("url")
+            errors.append({"site": name, "error": str(e)})
+            logger.warning(f"监控任务抓取源 {name} 失败: {e}")
+
+    # 关键词过滤（与 NewsCrawlerSkill 同一套逻辑）
+    filtered = NewsCrawlerSkill()._filter_results(
+        all_items, task.keywords, task.exclude_keywords, task.must_contain_keywords
     )
-    skill_result = await skill.safe_execute(ctx)
 
-    if skill_result.success:
-        task.last_run_at = datetime.now()
-        items = skill_result.data.get("results", []) if skill_result.data else []
-        await _save_crawl_results(db, task_id, items)
-        await db.flush()
-
-    # 提取抓取错误详情 (含 URL + 错误原因)
-    crawl_errors = skill_result.data.get("errors", []) if skill_result.data else []
+    task.last_run_at = datetime.now()
+    await _save_crawl_results(db, task_id, filtered)
+    await db.flush()
 
     return {
-        "success": skill_result.success,
-        "data": skill_result.data,
-        "error": skill_result.error,
-        "resolved_sites": len(resolved_urls),
+        "success": True,
+        "data": {
+            "total_crawled": len(all_items),
+            "after_filter": len(filtered),
+            "results": filtered[:50],
+            "errors": errors,
+            "crawled_at": datetime.now().isoformat(),
+        },
+        "error": None,
+        "resolved_sites": len(configs),
         "unresolved_sites": unresolved,
-        "skipped_api_sites": skipped_api,
-        "crawl_errors": crawl_errors,
+        "skipped_api_sites": [],
+        "crawl_errors": errors,
     }
 
 
@@ -584,6 +608,16 @@ class SourceToggle(BaseModel):
     enabled: bool
 
 
+class SourceUpdate(BaseModel):
+    """编辑数据源信息：仅更新传入的非空字段。"""
+    name: str | None = None
+    url: str | None = None
+    description: str | None = None
+    industry_code: str | None = None
+    weight: float | None = None
+    enabled: bool | None = None
+
+
 @router.patch("/sources/{code}")
 async def toggle_source_endpoint(
     code: str,
@@ -597,6 +631,66 @@ async def toggle_source_endpoint(
         raise HTTPException(status_code=404, detail=f"数据源 {code} 不存在")
     await db.commit()
     return {"success": True, "code": code, "enabled": body.enabled}
+
+
+@router.put("/sources/{code}")
+async def update_source_endpoint(
+    code: str,
+    body: SourceUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """数据源管理：修改名称/地址/说明/行业/权重/启用状态，并写回 sources.yaml。"""
+    from services.models import NewsSourceRegistry
+    from services.news.source_registry import update_source_in_yaml
+
+    result = await db.execute(
+        select(NewsSourceRegistry).where(NewsSourceRegistry.code == code)
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"数据源 {code} 不存在")
+
+    if body.name is not None:
+        row.name = body.name
+    if body.url is not None:
+        from services.news.fetchers import validate_source_url
+        try:
+            validate_source_url(body.url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        row.url = body.url
+    if body.description is not None:
+        row.description = body.description
+    if body.industry_code is not None:
+        row.industry_code = body.industry_code
+    if body.weight is not None:
+        row.weight = body.weight
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    await db.commit()
+
+    # 写回 sources.yaml，保证「从YAML同步」不会还原编辑
+    yaml_fields: dict = {}
+    if body.name is not None:
+        yaml_fields["name"] = body.name
+    if body.url is not None:
+        yaml_fields["url"] = body.url
+    if body.description is not None:
+        yaml_fields["description"] = body.description
+    if body.industry_code is not None:
+        yaml_fields["industry"] = body.industry_code
+    if body.weight is not None:
+        yaml_fields["weight"] = body.weight
+    if body.enabled is not None:
+        yaml_fields["enabled"] = body.enabled
+    if yaml_fields:
+        update_source_in_yaml(code, yaml_fields)
+
+    return {
+        "success": True,
+        "code": code,
+        "message": f"数据源 {code} 已更新",
+    }
 
 
 class AggregateRequest(BaseModel):

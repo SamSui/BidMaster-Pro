@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ShieldCheck, Loader2, AlertTriangle, CheckCircle2, XCircle, Download, FileText, Upload, FolderOpen, Copy, ChevronDown, ChevronRight, Eye, BookOpen, AlertCircle, ArrowRight } from 'lucide-react';
+import { ShieldCheck, Loader2, AlertTriangle, CheckCircle2, XCircle, Download, FileText, Upload, FolderOpen, Copy, ChevronDown, ChevronRight, Eye, BookOpen, AlertCircle, ArrowRight, Wand2 } from 'lucide-react';
 import { List, useDynamicRowHeight } from 'react-window';
 import { checkApi, projectApi, generateApi, type Project } from '../services/api';
 import { useAppStore } from '../stores/appStore';
@@ -138,6 +138,8 @@ export default function CheckPage() {
   const [activeCheck, setActiveCheck] = useState<CheckType>('fullCheck');
   const [reports, setReports] = useState<Array<{ id: string; type: string; risk_level: string; created_at: string }>>([]);
   const [checkProgress, setCheckProgress] = useState<string>('');
+  const [revising, setRevising] = useState(false);
+  const [reviseNotice, setReviseNotice] = useState<string>('');
 
   const [bidFile, setBidFile] = useState<File | null>(null);
   const [tenderFile, setTenderFile] = useState<File | null>(null);
@@ -360,6 +362,31 @@ export default function CheckPage() {
       handleUploadCheck();
     } else {
       handleProjectCheck();
+    }
+  };
+
+  const handleReviseBid = async () => {
+    if (!selectedProjectId || checkMode !== 'project') return;
+    setRevising(true);
+    setError('');
+    setReviseNotice('');
+    setCheckProgress('');
+    try {
+      const submitRes = await checkApi.reviseBid(selectedProjectId, {});
+      const taskId = (submitRes.data as { task_id?: string })?.task_id;
+      if (!taskId) {
+        setError((submitRes.data as { detail?: string })?.detail || '修订任务提交失败');
+        return;
+      }
+      setCheckProgress('按检查建议修订标书已提交...');
+      await checkApi.pollCheckTask(taskId, (msg) => setCheckProgress(msg));
+      await loadReports();
+      setReviseNotice('修订完成：受影响章节已按检查建议重写，并在修订后对合规/废标项做了复检。');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : '按建议修订失败');
+    } finally {
+      setRevising(false);
+      setCheckProgress('');
     }
   };
 
@@ -1167,16 +1194,37 @@ export default function CheckPage() {
             )}
           </div>
           {checkMode === 'project' && selectedProjectId && (
-            <button
-              onClick={handleExportDocx}
-              disabled={exportingDocx}
-              style={{
-                padding: '6px 14px',
-                background: '#2563eb',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: exportingDocx ? 'not-allowed' : 'pointer',
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                onClick={handleReviseBid}
+                disabled={revising || loading}
+                style={{
+                  padding: '6px 14px',
+                  background: revising ? '#a78bfa' : '#7c3aed',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: revising ? 'not-allowed' : 'pointer',
+                  fontSize: '12px',
+                  fontWeight: 500,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+              >
+                {revising ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+                {revising ? (checkProgress || '修订中...') : '按建议重新生成标书'}
+              </button>
+              <button
+                onClick={handleExportDocx}
+                disabled={exportingDocx}
+                style={{
+                  padding: '6px 14px',
+                  background: '#2563eb',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: exportingDocx ? 'not-allowed' : 'pointer',
                 fontSize: '12px',
                 fontWeight: 500,
                 display: 'flex',
@@ -1188,6 +1236,7 @@ export default function CheckPage() {
               {exportingDocx ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
               下载标书Word
             </button>
+            </div>
           )}
         </div>
 
@@ -1285,6 +1334,12 @@ export default function CheckPage() {
       {error && (
         <div style={{ marginTop: '16px', padding: '12px', background: '#fef2f2', borderRadius: '8px', color: '#dc2626', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <AlertTriangle size={16} /> {error}
+        </div>
+      )}
+
+      {reviseNotice && (
+        <div style={{ marginTop: '16px', padding: '12px', background: '#ecfdf5', borderRadius: '8px', color: '#065f46', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <CheckCircle2 size={16} /> {reviseNotice}
         </div>
       )}
 
