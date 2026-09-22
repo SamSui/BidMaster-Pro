@@ -41,6 +41,9 @@ dependencies = [
     "fastmcp>=2.0",
     "apprise>=1.8",
     "sentence-transformers>=3.0",
+    "feedparser>=6.0",
+    "requests>=2.31",
+    "reportlab>=4.0",
 ]
 
 [build-system]

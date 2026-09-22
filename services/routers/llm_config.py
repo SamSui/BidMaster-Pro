@@ -175,6 +175,16 @@ async def list_providers():
         {"id": "qianfan", "name": "百度千帆", "models": ["ernie-4.0", "ernie-3.5"]},
         {"id": "dashscope", "name": "阿里百炼", "models": ["qwen-max", "qwen-plus", "qwen-turbo"]},
         {"id": "siliconflow", "name": "硅基流动", "models": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen2.5-72B-Instruct", "Qwen/Qwen2.5-32B-Instruct", "THUDM/glm-4-9b-chat"]},
+        {"id": "volcengine", "name": "火山方舟", "models": [
+            "doubao-seed-2-1-pro-260915",
+            "doubao-seed-2-1-turbo-260628",
+            "doubao-seed-2-0-pro-260215",
+            "doubao-seed-2-0-lite-260428",
+            "doubao-seed-2-0-mini-260428",
+            "doubao-seed-code-preview-251028",
+            "deepseek-v4-pro-260425",
+            "deepseek-v4-flash-260425",
+        ]},
         {"id": "ollama", "name": "Ollama(本地)", "models": ["qwen2.5", "llama3.1", "mistral"]},
         {"id": "openai", "name": "OpenAI", "models": ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"]},
     ]}

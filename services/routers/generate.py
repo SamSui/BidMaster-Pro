@@ -1033,10 +1033,13 @@ async def stream_generate_all_chapters(
         # --- Concurrent generation (Semaphore=4) ---
         semaphore = asyncio.Semaphore(4)
         gen_tasks = []
+        events_q = asyncio.Queue()
 
         async def _gen_one(ch_info):
             ch_id = ch_info["id"]
             ch_title = ch_info["title"]
+            # 章节进入编排即上报 progress，让前端实时刷新“正在生成/当前进度”
+            await events_q.put(("progress", ch_title))
             async with semaphore:
                 try:
                     chapter_node, parent_node, sibling_nodes = _find_outline_node_with_context(
@@ -1134,23 +1137,32 @@ async def stream_generate_all_chapters(
                         collected.append(chunk)
                     full_content = "".join(collected)
                     full_content = _post_process_stream_content(full_content, ch_title)
-                    return ("ok", ch_id, ch_title, full_content)
+                    await events_q.put(("ok", ch_id, ch_title, full_content))
                 except Exception as e:
-                    return ("error", ch_id, ch_title, str(e))
+                    await events_q.put(("error", ch_id, ch_title, str(e)))
 
         for ch_info in all_chapters:
             gen_tasks.append(asyncio.create_task(_gen_one(ch_info)))
 
-        for task in asyncio.as_completed(gen_tasks):
-            result = await task
-            if result[0] == "ok":
-                _, ch_id, ch_title, full_content = result
+        # 队列驱动收集：章节开始/完成/失败都会实时输出，前端进度条随之动态刷新
+        processed = 0
+        pending = len(gen_tasks)
+        while processed < pending:
+            kind, *payload = await events_q.get()
+            if kind == "progress":
+                title = payload[0]
+                # current 以已完成为准(进度真实)，chapter_title 指示当前正在生成的章节
+                yield f"data: {json.dumps({'type': 'progress', 'current': completed, 'total': total, 'chapter_title': title, 'status': 'generating'}, ensure_ascii=False)}\n\n"
+            elif kind == "ok":
+                ch_id, ch_title, full_content = payload
                 all_contents[ch_id] = full_content
                 completed += 1
+                processed += 1
                 yield f"data: {json.dumps({'type': 'chapter_done', 'chapter_id': ch_id, 'chapter_title': ch_title, 'word_count': len(full_content), 'completed': completed, 'total': total}, ensure_ascii=False)}\n\n"
-            else:
-                _, ch_id, ch_title, err_msg = result
+            elif kind == "error":
+                ch_id, ch_title, err_msg = payload
                 failed += 1
+                processed += 1
                 logger.error(f"[批量生成] 章节{ch_id}({ch_title})失败: {err_msg}")
                 yield f"data: {json.dumps({'type': 'chapter_error', 'chapter_id': ch_id, 'chapter_title': ch_title, 'error': str(err_msg)[:200]}, ensure_ascii=False)}\n\n"
 

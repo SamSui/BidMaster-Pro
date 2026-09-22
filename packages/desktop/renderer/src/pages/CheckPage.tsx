@@ -291,7 +291,9 @@ export default function CheckPage() {
         const taskId = (submitRes.data as Record<string, unknown>)?.task_id as string;
         if (taskId) {
           setCheckProgress('全面检查任务已提交...');
-          const result = await checkApi.pollCheckTask(taskId, (msg) => setCheckProgress(msg));
+          // 全面检查包含 15 项并行 LLM 检查，慢模型下可能耗时较长：
+          // 轮询预算 600 次 × 5s = 50 分钟，后端会实时汇报 "N/15 项检查完成"
+          const result = await checkApi.pollCheckTask(taskId, (msg) => setCheckProgress(msg), 600, 5000);
           setResults(result);
           setCheckProgress('');
           return;

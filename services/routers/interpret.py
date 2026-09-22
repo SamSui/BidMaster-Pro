@@ -258,8 +258,21 @@ async def build_scoring_matrix(project_id: str, db: AsyncSession = Depends(get_d
         select(Analysis).where(Analysis.project_id == project.id)
     )
     analysis = analysis_result.scalar_one_or_none()
-    if not analysis or not analysis.dimensions:
-        raise HTTPException(status_code=400, detail="请先完成招标解读")
+
+    # 评分数据来源：优先使用招标解读的 scoring 维度；若尚未解读，
+    # 退化为直接从招标文档原文提取评分信息（适用于资讯中心转来的项目）。
+    scoring_data: dict = {}
+    if analysis and analysis.dimensions:
+        scoring_data = analysis.dimensions.get("scoring", {}) or {}
+
+    if not scoring_data:
+        doc_result = await db.execute(
+            select(Document).where(Document.id == project.tender_doc_id)
+        )
+        doc = doc_result.scalar_one_or_none()
+        if not doc or not doc.parsed_content:
+            raise HTTPException(status_code=400, detail="请先解析招标文件")
+        scoring_data = {"raw_tender_text": doc.parsed_content[:6000]}
 
     from services.interpret.skills.scoring_matrix_skill import ScoringMatrixSkill
     from core.skill_engine.base import SkillContext
@@ -270,11 +283,15 @@ async def build_scoring_matrix(project_id: str, db: AsyncSession = Depends(get_d
         project_id=project_id,
         db=db,
         llm=gateway,
-        parameters={"scoring_data": analysis.dimensions.get("scoring", {})},
+        parameters={"scoring_data": scoring_data},
     )
     skill_result = await skill.safe_execute(ctx)
 
-    if skill_result.success and analysis:
+    if skill_result.success:
+        # 确保 Analysis 存在（无解读记录时补建），用于保存评分矩阵并供下游(评分覆盖)使用
+        if analysis is None:
+            analysis = Analysis(project_id=str(project.id), dimensions={})
+            db.add(analysis)
         analysis.scoring_matrix = skill_result.data
         await db.flush()
 

@@ -173,6 +173,7 @@ export default function SettingsPage() {
     qianfan: 'https://aip.baidubce.com',
     dashscope: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     siliconflow: 'https://api.siliconflow.cn/v1',
+    volcengine: 'https://ark.cn-beijing.volces.com/api/v3',
     ollama: 'http://localhost:11434',
     openai: 'https://api.openai.com/v1',
   };

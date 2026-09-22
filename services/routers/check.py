@@ -403,7 +403,8 @@ async def full_check(project_id: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     tm = TaskManager.instance()
-    task = await tm.submit("full_check", _do_full_check, project_id)
+    task = tm.create_task("full_check")
+    await tm.run(task, _do_full_check, project_id, task)
 
     return {
         "task_id": task.task_id,
@@ -412,7 +413,7 @@ async def full_check(project_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
-async def _do_full_check(project_id: str):
+async def _do_full_check(project_id: str, task=None):
     """Background worker: run 15 check skills in parallel and persist results."""
     from services.database import async_session
 
@@ -498,11 +499,16 @@ async def _do_full_check(project_id: str):
                 ("pricingLogic", base_params),
             ]
 
-            # Run all skills in parallel
-            results = await asyncio.gather(
-                *[_run_skill(ct, params) for ct, params in skill_tasks],
-                return_exceptions=True,
-            )
+            # Run all skills in parallel, reporting progress as each completes
+            total = len(skill_tasks)
+            if task is not None:
+                task.progress_message = f"0/{total} 项检查完成"
+
+            results = []
+            for fut in asyncio.as_completed([_run_skill(ct, params) for ct, params in skill_tasks]):
+                results.append(await fut)
+                if task is not None:
+                    task.progress_message = f"{len(results)}/{total} 项检查完成"
 
             all_results = {}
             for r in results:
@@ -839,7 +845,7 @@ async def _build_check_params(
     return base
 
 
-async def _do_single_check(project_id: str, check_type: str):
+async def _do_single_check(project_id: str, check_type: str, task=None):
     """Background worker: run a single check (or selfcheck) and persist results."""
     from services.database import async_session
 
@@ -891,6 +897,8 @@ async def _do_single_check(project_id: str, check_type: str):
                 _run_sub(QualificationCheckSkill, {"tender_text": tender_text, "bid_text": bid_text, "bid_deadline": bid_deadline}, "qualification_check"),
             ]
             sub_results = await asyncio.gather(*sub_tasks, return_exceptions=True)
+            if task is not None:
+                task.progress_message = "汇总自查结果..."
             for sr in sub_results:
                 if isinstance(sr, Exception):
                     logger.warning(f"[selfcheck] sub-skill error: {sr}")
@@ -936,6 +944,9 @@ async def _do_single_check(project_id: str, check_type: str):
         module = importlib.import_module(module_path)
         skill_class = getattr(module, class_name)
         skill = skill_class()
+
+        if task is not None:
+            task.progress_message = f"正在执行 {check_type} 检查..."
 
         async with session_factory() as skill_db:
             ctx = SkillContext(project_id=project_id, db=skill_db, llm=gateway, parameters=params)
@@ -993,7 +1004,8 @@ async def submit_single_check(
         )
 
     tm = TaskManager.instance()
-    task = await tm.submit("single_check", _do_single_check, project_id, check_type)
+    task = tm.create_task("single_check")
+    await tm.run(task, _do_single_check, project_id, check_type, task)
 
     return {
         "task_id": task.task_id,

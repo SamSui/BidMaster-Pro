@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
 
 from services.database import get_db
-from services.models import MonitoringTask, CrawlResult, NewsSourceRegistry, HotspotItem, Project, User
+from services.models import MonitoringTask, CrawlResult, NewsSourceRegistry, HotspotItem, Project, User, Document, DocumentType
 from services.llm_factory import get_llm_gateway
 from core.skill_engine.base import SkillContext
 from services.middleware.rbac_middleware import get_current_user_optional
@@ -978,6 +978,28 @@ async def convert_hotspot_to_bid(
     )
     db.add(project)
     await db.flush()
+
+    # 热点自带招标/商机详情( content )时，自动落一份 tender 文档并关联到项目，
+    # 使得无需再上传+解析招标文件即可直接进行大纲/正文生成。
+    hotspot_content = (row.content or "").strip()
+    if hotspot_content:
+        doc = Document(
+            project_id=str(project.id),
+            type=DocumentType.TENDER.value,
+            file_path=f"hotspot://{row.id}",
+            original_name=row.title[:200] or "资讯来源",
+            parsed_content=hotspot_content,
+            doc_metadata={
+                "source": row.source,
+                "from_hotspot": True,
+                "url": row.url,
+                "pub_date": row.pub_date,
+            },
+        )
+        db.add(doc)
+        await db.flush()
+        project.tender_doc_id = str(doc.id)
+        project.config = {**(project.config or {}), "tender_from_hotspot": True}
 
     row.is_converted = True
     row.converted_project_id = str(project.id)

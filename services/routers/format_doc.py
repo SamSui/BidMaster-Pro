@@ -33,6 +33,26 @@ EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
+def _file_download_headers(filename: str) -> dict[str, str]:
+    """生成支持中文文件名的下载响应头。
+
+    filename* 按 RFC5987 做 UTF-8 百分号编码（浏览器可显示中文），
+    同时提供纯 ASCII 的 filename 兜底——避免 Starlette 用 latin-1
+    编码含中文的头值时报 UnicodeEncodeError（500）。
+    """
+    from urllib.parse import quote
+    import re
+
+    # ASCII 兜底段作为原始 filename= 值，必须剔除 CR/LF 及分隔符，防止响应头注入
+    ascii_name = re.sub(
+        r'[\r\n"\';]',
+        "_",
+        filename.encode("ascii", errors="replace").decode("ascii"),
+    ) or "document"
+    encoded = quote(filename)  # UTF-8 percent-encoded
+    return {"Content-Disposition": f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'}
+
+
 def _save_upload(file: UploadFile, prefix: str = "") -> Path:
     if file.size and file.size > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限")
@@ -214,7 +234,7 @@ async def export_to_doc(
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/msword",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        headers=_file_download_headers(filename),
     )
 
 
@@ -269,7 +289,7 @@ async def export_to_pdf(
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        headers=_file_download_headers(filename),
     )
 
 
@@ -292,7 +312,7 @@ async def export_formatted_docx(
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        headers=_file_download_headers(filename),
     )
 
 
@@ -381,17 +401,21 @@ async def format_from_project(
         if not (ch.content and ch.content.strip()):
             continue
         doc.add_heading(ch.title, level=1)
+        # Markdown 标题 → Word 标题级别（长前缀优先，避免 #### 被 ## 误吞）
+        heading_levels = [
+            ("###### ", 6), ("##### ", 5), ("#### ", 4), ("### ", 3), ("## ", 2), ("# ", 1),
+        ]
         for line in ch.content.split("\n"):
             line = line.strip()
             if not line:
                 continue
-            if line.startswith("## "):
-                doc.add_heading(line[3:].strip(), level=2)
-            elif line.startswith("### "):
-                doc.add_heading(line[4:].strip(), level=3)
-            elif line.startswith("# "):
-                doc.add_heading(line[2:].strip(), level=1)
-            else:
+            mapped = False
+            for prefix, level in heading_levels:
+                if line.startswith(prefix):
+                    doc.add_heading(line[len(prefix):].strip(), level=level)
+                    mapped = True
+                    break
+            if not mapped:
                 doc.add_paragraph(line)
 
     output_dir = Path(tempfile.gettempdir()) / "bidmaster_format"
@@ -419,6 +443,20 @@ async def format_from_project(
         raise HTTPException(status_code=500, detail=result.error or "项目章节组装失败")
 
     final_output = result.data.get("output_path") if isinstance(result.data, dict) else None
+
+    # 让排版产物落在 /download 可访问的目录（避免临时目录导致 docx 无法下载）。
+    # /download 只允许 serve UPLOAD_DIR 下的文件，而 DocxFormatSkill 会写到源文件旁，
+    # 项目模式的源在系统 Temp 目录，故复制一份到 UPLOAD_DIR。
+    if final_output:
+        _out = Path(final_output)
+        if _out.exists():
+            try:
+                _dest = UPLOAD_DIR / _out.name
+                shutil.copyfile(_out, _dest)
+                final_output = str(_dest.resolve())
+            except OSError:
+                # 复制失败则退回原路径（下载接口可能仍报非法路径，但至少排版本身不报错）
+                pass
 
     return {
         "success": True,
@@ -511,5 +549,5 @@ async def download_formatted_file(path: str):
     return StreamingResponse(
         p.open("rb"),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{p.name}"},
+        headers=_file_download_headers(p.name),
     )

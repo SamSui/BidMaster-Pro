@@ -95,6 +95,22 @@ class TaskManager:
             *args, **kwargs: 传给 coro_fn 的参数
         """
         task = self.create_task(task_type)
+        await self.run(task, coro_fn, *args, **kwargs)
+        return task
+
+    async def run(
+        self,
+        task: AsyncTask,
+        coro_fn: Callable[..., Coroutine],
+        *args,
+        **kwargs,
+    ) -> AsyncTask:
+        """对已创建的任务执行协程。
+
+        与 submit 的区别：调用方先 create_task 拿到引用，
+        可以把 task 传给 coro_fn，让 worker 在执行过程中更新
+        progress / progress_message（前端轮询可见）。
+        """
 
         async def _run():
             task.status = TaskStatus.RUNNING

@@ -647,11 +647,14 @@ export default function GeneratePage() {
         } else if (type === 'chapter_done') {
           setBatchProgress(prev => prev ? {
             ...prev,
+            current: (data.completed as number) ?? ((prev.current || 0) + 1),
+            currentTitle: data.chapter_title as string,
             completed: [...prev.completed, { id: data.chapter_id as string, title: data.chapter_title as string, wordCount: data.word_count as number }],
           } : null);
         } else if (type === 'chapter_error') {
           setBatchProgress(prev => prev ? {
             ...prev,
+            current: (prev.current || 0) + 1,
             failed: [...prev.failed, { id: data.chapter_id as string, title: data.chapter_title as string, error: data.error as string }],
           } : null);
         } else if (type === 'consistency_check') {

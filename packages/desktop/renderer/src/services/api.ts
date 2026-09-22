@@ -259,8 +259,8 @@ export const generateApi = {
         } else if (task.status === 'failed') {
           throw new Error(task.error || '任务执行失败');
         } else {
-          const elapsed = task.elapsed_seconds ? `${Math.round(task.elapsed_seconds)}s` : '';
-          onProgress?.(`任务执行中... ${elapsed}`);
+          const elapsed = task.elapsed_seconds ? ` ${Math.round(task.elapsed_seconds)}s` : '';
+          onProgress?.(task.progress_message ? `${task.progress_message}${elapsed}` : `任务执行中...${elapsed}`);
         }
       } catch (e) {
         const isTaskFailure = e instanceof Error && e.message === '任务执行失败';
@@ -318,7 +318,7 @@ export const checkApi = {
       timeout: 300000,
     });
   },
-  pollCheckTask: async (taskId: string, onProgress?: (msg: string) => void, maxPolls: number = 120, interval: number = 3000): Promise<Record<string, unknown>> => {
+  pollCheckTask: async (taskId: string, onProgress?: (msg: string) => void, maxPolls: number = 240, interval: number = 3000): Promise<Record<string, unknown>> => {
     let consecutiveErrors = 0;
     for (let i = 0; i < maxPolls; i++) {
       await new Promise(r => setTimeout(r, interval));
@@ -331,8 +331,8 @@ export const checkApi = {
         } else if (task.status === 'failed') {
           throw new Error(task.error || '任务执行失败');
         } else {
-          const elapsed = task.elapsed_seconds ? `${Math.round(task.elapsed_seconds)}s` : '';
-          onProgress?.(`检查执行中... ${elapsed}`);
+          const elapsed = task.elapsed_seconds ? ` ${Math.round(task.elapsed_seconds)}s` : '';
+          onProgress?.(task.progress_message ? `${task.progress_message}${elapsed}` : `检查执行中...${elapsed}`);
         }
       } catch (e) {
         // Immediately throw if the task itself failed (not a transient network error)

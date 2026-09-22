@@ -8,6 +8,21 @@ from sqlalchemy.orm import DeclarativeBase, relationship
 from datetime import datetime, timezone
 import uuid
 
+# MEDIUMTEXT 是 MySQL 专有类型，PostgreSQL 无法渲染（BMP_DB_TYPE 默认为 postgresql）。
+# 用 with_variant 声明 PG 方言下降级为 TEXT，保证两种库都能建表。
+LONGTEXT = MEDIUMTEXT().with_variant(Text(), "postgresql")
+
+
+def _utcnow() -> datetime:
+    """列默认值统一使用的 naive UTC 时间。
+
+    所有时间列都是 naive TIMESTAMP（见 db/init_pg.sql / init_mysql.sql），
+    asyncpg 拒绝把 tz-aware datetime 写进这种列，会抛
+    DataError: can't subtract offset-naive and offset-aware datetimes。
+    因此这里去掉 tzinfo，MySQL / PostgreSQL 行为一致，且避免本地时区混入。
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 class Base(DeclarativeBase):
     pass
@@ -77,8 +92,8 @@ class User(Base):
     role = Column(String(20), default=UserRole.WRITER.value)
     avatar = Column(String(500), nullable=True)
     password_hash = Column(String(255), nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     projects = relationship("Project", back_populates="user")
 
@@ -92,8 +107,8 @@ class Project(Base):
     status = Column(String(50), default=ProjectStatus.CREATED.value, index=True)
     tender_doc_id = Column(String(36), ForeignKey("documents.id"), nullable=True)
     config = Column(JSON, default=dict)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     user = relationship("User", back_populates="projects")
     documents = relationship("Document", back_populates="project", foreign_keys="Document.project_id")
@@ -112,9 +127,9 @@ class Document(Base):
     file_path = Column(String(500), nullable=False)
     original_name = Column(String(255), nullable=True)
     file_size = Column(Integer, nullable=True)
-    parsed_content = Column(MEDIUMTEXT, nullable=True)
+    parsed_content = Column(LONGTEXT, nullable=True)
     doc_metadata = Column(JSON, default=dict)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
     project = relationship("Project", back_populates="documents", foreign_keys=[project_id])
 
@@ -128,8 +143,8 @@ class Analysis(Base):
     scoring_matrix = Column(JSON, default=dict)
     risk_flags = Column(JSON, default=dict)
     sections = Column(JSON, default=list)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     project = relationship("Project", back_populates="analysis")
 
@@ -143,8 +158,8 @@ class Outline(Base):
     tree = Column(JSON, default=dict)
     score_mapping = Column(JSON, default=dict)
     reviewed = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     project = relationship("Project", back_populates="outline")
 
@@ -156,13 +171,13 @@ class Chapter(Base):
     project_id = Column(String(36), ForeignKey("projects.id"), nullable=False, index=True)
     outline_id = Column(String(36), ForeignKey("outlines.id"), nullable=True)
     title = Column(String(500), nullable=False)
-    content = Column(MEDIUMTEXT, nullable=True)
+    content = Column(LONGTEXT, nullable=True)
     mode = Column(String(10), default="A")
     status = Column(String(20), default="pending")
     word_count = Column(Integer, default=0)
     sort_order = Column(Integer, default=0)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     project = relationship("Project", back_populates="chapters")
 
@@ -176,7 +191,7 @@ class CheckReport(Base):
     results = Column(JSON, default=dict)
     risk_level = Column(String(20), default="low")
     summary = Column(JSON, default=dict)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
     project = relationship("Project", back_populates="check_reports")
 
@@ -190,7 +205,7 @@ class SkillConfig(Base):
     version = Column(String(20), default="1.0.0")
     config = Column(JSON, default=dict)
     enabled = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class AgentConfig(Base):
@@ -202,7 +217,7 @@ class AgentConfig(Base):
     skills = Column(JSON, default=list)
     config = Column(JSON, default=dict)
     enabled = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class Notification(Base):
@@ -214,7 +229,7 @@ class Notification(Base):
     content = Column(Text, nullable=False)
     status = Column(String(20), default="pending")
     sent_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class KnowledgeBase(Base):
@@ -225,7 +240,7 @@ class KnowledgeBase(Base):
     doc_count = Column(Integer, default=0)
     embedding_model = Column(String(100), default="text-embedding-v3")
     collection_name = Column(String(200), nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class MonitoringTask(Base):
@@ -241,7 +256,7 @@ class MonitoringTask(Base):
     interval_minutes = Column(Integer, default=60)
     enabled = Column(Boolean, default=True)
     last_run_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class CrawlResult(Base):
@@ -253,13 +268,13 @@ class CrawlResult(Base):
     url = Column(String(1000), nullable=False)
     source = Column(String(500), default="")
     pub_date = Column(String(50), nullable=True)
-    content = Column(MEDIUMTEXT, nullable=True)
+    content = Column(LONGTEXT, nullable=True)
     keyword_score = Column(Float, default=0.0)
     relevance_score = Column(Float, default=0.0)
     category = Column(String(50), default="general")
     is_hot = Column(Boolean, default=False)
     hot_score = Column(Float, default=0.0)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class RBACRole(Base):
@@ -270,7 +285,7 @@ class RBACRole(Base):
     display_name = Column(String(200), nullable=False)
     description = Column(Text, default="")
     is_system = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class RBACPermission(Base):
@@ -281,7 +296,7 @@ class RBACPermission(Base):
     name = Column(String(200), nullable=False)
     category = Column(String(100), nullable=False)
     description = Column(Text, default="")
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class RBACUserRole(Base):
@@ -290,7 +305,7 @@ class RBACUserRole(Base):
     id = Column(String(36), primary_key=True, default=_uuid_default)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     role_id = Column(String(36), ForeignKey("rbac_roles.id"), nullable=False, index=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
     __table_args__ = (
         UniqueConstraint("user_id", "role_id", name="uq_rbac_user_role"),
@@ -303,7 +318,7 @@ class RBACRolePermission(Base):
     id = Column(String(36), primary_key=True, default=_uuid_default)
     role_id = Column(String(36), ForeignKey("rbac_roles.id"), nullable=False, index=True)
     permission_id = Column(String(36), ForeignKey("rbac_permissions.id"), nullable=False, index=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
 
     __table_args__ = (
         UniqueConstraint("role_id", "permission_id", name="uq_rbac_role_perm"),
@@ -333,8 +348,8 @@ class NewsSourceRegistry(Base):
     last_status = Column(String(20), default="")
     last_error = Column(Text, default="")
 
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class HotspotItem(Base):
@@ -347,7 +362,7 @@ class HotspotItem(Base):
     source = Column(String(500), default="")
     sources = Column(JSON, default=list)
     pub_date = Column(String(50), nullable=True)
-    content = Column(MEDIUMTEXT, nullable=True)
+    content = Column(LONGTEXT, nullable=True)
     source_code = Column(String(100), default="", index=True)
     industry_code = Column(String(20), default="12", index=True)
     region = Column(String(50), default="")
@@ -369,8 +384,8 @@ class HotspotItem(Base):
     is_converted = Column(Boolean, default=False, index=True)
     converted_project_id = Column(String(36), default="")
 
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class LLMProviderConfig(Base):
@@ -386,8 +401,8 @@ class LLMProviderConfig(Base):
     is_default = Column(Boolean, default=False, nullable=False, index=True)
     enabled = Column(Boolean, default=True, nullable=False)
     note = Column(String(256), nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class ApiKey(Base):
@@ -413,8 +428,8 @@ class ApiKey(Base):
     expires_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     note = Column(String(256), nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class ApiKeyUsage(Base):
@@ -430,4 +445,4 @@ class ApiKeyUsage(Base):
     user_agent = Column(String(256), nullable=True)
     client_ip = Column(String(64), nullable=True)
     error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)

@@ -215,8 +215,6 @@ def _build_md_heading_rules(chapter_title: str = "") -> list[Rule]:
                  multiline=True),
         ])
     rules.extend([
-        Rule("md_h_lift_low_heading",
-             r'^#{1,2}\s+(?!\w)', '### ', multiline=True),
         Rule("md_h_merge_consecutive",
              r'^(#{1,6})\s+(#{1,6})\s+', r'\1 ', multiline=True),
     ])

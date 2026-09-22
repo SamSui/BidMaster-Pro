@@ -6,7 +6,7 @@ import { useAppStore } from '../stores/appStore';
 export default function LoginPage() {
   const navigate = useNavigate();
   const { setUser, setToken } = useAppStore();
-  const [email, setEmail] = useState('admin@bidmaster.com');
+  const [email, setEmail] = useState('admin@bidmaster.pro');
   const [password, setPassword] = useState('admin123');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');

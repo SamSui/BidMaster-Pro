@@ -61,7 +61,6 @@ docs/
 tests/
 *.md
 !README.md
-本地架构.html
 PRESENTATION.html
 SOCIAL_PREVIEW.html
 

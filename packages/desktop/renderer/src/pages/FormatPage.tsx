@@ -368,10 +368,13 @@ export default function FormatPage() {
       return;
     }
     if (sourceMode === 'project' && mode !== 'format') {
-      setError('项目源仅支持"一键排版"模式，请切换为上传文件或切换模式');
-      return;
+      if (!file) {
+        setError('请先完成「一键排版」生成排版文件，再进行格式检查/差异对比/XML美化');
+        return;
+      }
+      // 项目源 + 非排版模式：使用已载入的排版文件，走下方的文件处理分支
     }
-    if (sourceMode === 'project') {
+    if (sourceMode === 'project' && mode === 'format') {
       if (selectedProjectChapterCount === 0) {
         setError(`项目「${projects.find(p => p.id === selectedProjectId)?.name || ''}」尚未生成任何章节正文，请先到「投标生成」完成「大纲生成」和「正文生成」。`);
         return;
@@ -386,7 +389,7 @@ export default function FormatPage() {
     setError('');
 
     try {
-      if (sourceMode === 'project') {
+      if (sourceMode === 'project' && mode === 'format') {
         const res = await formatApi.formatFromProject(selectedProjectId, template);
         const out = (res.data?.output_path as string) || '';
         setFormatResult({
@@ -395,6 +398,15 @@ export default function FormatPage() {
           chapters: res.data?.chapters,
         });
         setLastOutputPath(out);
+        // 将排版产物加载为本地文件，使「格式检查/差异对比/XML美化/导出」能作用于排版结果
+        try {
+          const blobRes = await fetch(formatApi.downloadOutput(out));
+          if (blobRes.ok) {
+            const blob = await blobRes.blob();
+            const fname = `${res.data?.project_name || 'bidmaster'}_已排版.docx`;
+            setFile(new File([blob], fname, { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+          }
+        } catch { /* 拉取失败仅影响后续子模式可用性，不阻断已完成的排版 */ }
         return;
       }
       if (mode === 'check') {
@@ -431,15 +443,21 @@ export default function FormatPage() {
   };
 
   const handleExport = async (target: OutputFormat) => {
-    if (!file) {
-      setExportError('请先上传文件');
+    const hasFile = !!file;
+    const canDownloadDirect = target === 'docx' && !!lastOutputPath;
+    const canProjectExport = sourceMode === 'project' && !!selectedProjectId;
+    if (!hasFile && !canDownloadDirect && !canProjectExport) {
+      setExportError('请先上传文件或完成一键排版');
       return;
     }
     setExporting(target);
     setExportError('');
     try {
-      const baseName = file.name.replace(/\.docx?$/i, '');
-      if (target === 'docx' && lastOutputPath) {
+      const baseName = file
+        ? file.name.replace(/\.docx?$/i, '')
+        : (projects.find(p => p.id === selectedProjectId)?.name || 'bidmaster');
+      if (canDownloadDirect) {
+        // 已有排版产物，直接下载（上传模式 / 项目模式均可）
         const link = document.createElement('a');
         link.href = formatApi.downloadOutput(lastOutputPath);
         link.download = `${baseName}.docx`;
@@ -448,11 +466,21 @@ export default function FormatPage() {
         document.body.removeChild(link);
         return;
       }
+      if (!hasFile && canProjectExport) {
+        // 项目源但无本地排版文件：doc/PDF 走项目导出端点
+        const res = await generateApi.exportDocx(selectedProjectId, { fmt: target });
+        const projBlob = res.data as unknown;
+        if (!(projBlob instanceof Blob)) {
+          throw new Error('后端未返回文件内容（可能是错误响应）');
+        }
+        downloadBlob(projBlob, `${baseName}.${target}`);
+        return;
+      }
       const res = target === 'docx'
-        ? await formatApi.exportFormattedDocx(file, template)
+        ? await formatApi.exportFormattedDocx(file!, template)
         : target === 'doc'
-          ? await formatApi.exportDoc(file, template, true)
-          : await formatApi.exportPdf(file, template, true);
+          ? await formatApi.exportDoc(file!, template, true)
+          : await formatApi.exportPdf(file!, template, true);
       const blob = res.data as unknown;
       if (!(blob instanceof Blob)) {
         throw new Error('后端未返回文件内容（可能是错误响应）');
@@ -1158,7 +1186,8 @@ export default function FormatPage() {
           <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '8px' }}>操作模式</label>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
             {modeOptions.map(opt => {
-              const disabled = sourceMode === 'project' && opt.key !== 'format';
+              // 项目源默认仅支持一键排版；一键排版产物加载为文件后可继续检查/对比/美化
+              const disabled = sourceMode === 'project' && opt.key !== 'format' && !file;
               return (
                 <div
                   key={opt.key}
@@ -1172,7 +1201,7 @@ export default function FormatPage() {
                     transition: 'all 0.2s',
                     opacity: disabled ? 0.5 : 1,
                   }}
-                  title={disabled ? '项目源仅支持一键排版' : ''}
+                  title={disabled ? '项目源请先完成一键排版以生成排版文件' : ''}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', fontWeight: 600 }}>
                     {opt.icon} {opt.label}
@@ -1190,9 +1219,13 @@ export default function FormatPage() {
             if (sourceMode === 'file' && !file) return false;
             if (sourceMode === 'project') {
               if (!selectedProjectId) return false;
-              if (selectedProjectChapterCount === 0) return false;
-              const emptyCount = selectedProjectChapters.filter(c => c.has_content === false || (!c.has_content && (!c.word_count || c.word_count === 0))).length;
-              if (emptyCount === selectedProjectChapters.length) return false;
+              if (mode === 'format') {
+                if (selectedProjectChapterCount === 0) return false;
+                const emptyCount = selectedProjectChapters.filter(c => c.has_content === false || (!c.has_content && (!c.word_count || c.word_count === 0))).length;
+                if (emptyCount === selectedProjectChapters.length) return false;
+              } else if (!file) {
+                return false;
+              }
             }
             return true;
           })();
@@ -1213,7 +1246,7 @@ export default function FormatPage() {
                 fontWeight: 600,
               }}
             >
-              {loading ? '处理中...' : (sourceMode === 'project' ? '一键排版项目' : (modeOptions.find(m => m.key === mode)?.label || '执行'))}
+              {loading ? '处理中...' : ((sourceMode === 'project' && mode === 'format') ? '一键排版项目' : (modeOptions.find(m => m.key === mode)?.label || '执行'))}
             </button>
           );
         })()}
@@ -1253,15 +1286,15 @@ export default function FormatPage() {
           </div>
           <button
             onClick={() => handleExport(outputFormat)}
-            disabled={!lastOutputPath || exporting !== null}
+            disabled={(!lastOutputPath && !file) || exporting !== null}
             style={{
               width: '100%',
               padding: '8px',
-              background: !lastOutputPath || exporting !== null ? '#94a3b8' : '#0f766e',
+              background: (!lastOutputPath && !file) || exporting !== null ? '#94a3b8' : '#0f766e',
               color: 'white',
               border: 'none',
               borderRadius: '6px',
-              cursor: !lastOutputPath || exporting !== null ? 'not-allowed' : 'pointer',
+              cursor: (!lastOutputPath && !file) || exporting !== null ? 'not-allowed' : 'pointer',
               fontSize: '13px',
               fontWeight: 500,
               display: 'flex',

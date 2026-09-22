@@ -7,6 +7,7 @@
 
 import json
 import logging
+import re
 import time
 from collections import deque
 from typing import AsyncGenerator, Any, Callable
@@ -42,6 +43,7 @@ class LLMGateway:
             "deepseek", "openai", "ollama", "zhipu", "dashscope",
             "azure", "anthropic", "cohere", "huggingface", "vertex_ai",
             "gemini", "mistral", "groq", "together_ai", "replicate",
+            "volcengine", "ark",
         }
         if "/" in model:
             prefix, rest = model.split("/", 1)
@@ -58,8 +60,10 @@ class LLMGateway:
             api_key = provider.get("api_key") or ""
             api_base = provider.get("api_base") or api_base
 
-        # 确保 api_base 以 /v1 结尾（兼容不同格式）
-        if api_base and not api_base.rstrip("/").endswith("/v1"):
+        # 仅在路径未以版本段结尾时补 /v1。
+        # 已带版本段的 base 不能再补：火山方舟 /api/v3、智谱 /api/paas/v4 补了会变成
+        # /api/v3/v1、/api/paas/v4/v1，请求直接 404。
+        if api_base and not re.search(r"/v\d+$", api_base.rstrip("/")):
             api_base = api_base.rstrip("/") + "/v1"
 
         return AsyncOpenAI(

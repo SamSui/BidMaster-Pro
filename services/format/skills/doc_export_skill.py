@@ -82,18 +82,19 @@ class DocExportSkill(Skill):
             return {"success": False, "error": "未找到 soffice"}
 
         try:
-            with tempfile.TemporaryDirectory(prefix="bmp_doc_") as profile_dir:
-                cmd = [
-                    soffice_cmd,
-                    f"-env:UserInstallation=file://{profile_dir.replace(os.sep, '/')}",
-                    "--headless",
-                    "--convert-to",
-                    "doc:MS Word 2007 XML",
-                    "--outdir",
-                    str(target_dir),
-                    str(src),
-                ]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            # 注意：不要用全新空 profile（-env:UserInstallation=临时目录），
+            # 首次会因 profile 未初始化而 --convert-to 退出码 1；与 PDF 转换一致用默认 profile。
+            # 过滤器用 "MS Word 97" 产出真正的二进制 .doc，而非 "MS Word 2007 XML"(实为 OOXML)。
+            cmd = [
+                soffice_cmd,
+                "--headless",
+                "--convert-to",
+                "doc:MS Word 97",
+                "--outdir",
+                str(target_dir),
+                str(src),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if proc.returncode != 0:
                 return {"success": False, "error": f"soffice 退出码 {proc.returncode}: {proc.stderr[:300]}"}
             doc_path = target_dir / (src.stem + ".doc")
