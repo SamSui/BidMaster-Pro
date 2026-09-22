@@ -55,3 +55,9 @@ test_outline_gen.py
 /docs/
 /tests/
 
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/

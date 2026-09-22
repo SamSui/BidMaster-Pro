@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "BidMaster_Pro",
+  "project_id": "5ec4ba5a-c65e-4092-b22d-7f46d85d6baa"
+}
